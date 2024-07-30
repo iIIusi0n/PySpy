@@ -29,13 +29,6 @@ Logger = logging.getLogger(__name__)
 def main(char_names, conn_mem, cur_mem, conn_dsk, cur_dsk):
     chars_found = get_char_ids(conn_mem, cur_mem, char_names)
     if chars_found > 0:
-        # Run Pyspy remote database query in seprate thread
-        tp = threading.Thread(
-            target=get_character_intel(conn_mem, cur_mem),
-            daemon=True
-            )
-        tp.start()
-
         # Run zKill query in seprate thread
         char_ids_mem = cur_mem.execute(
             "SELECT char_id, last_update FROM characters ORDER BY char_name"
@@ -76,15 +69,21 @@ def main(char_names, conn_mem, cur_mem, conn_dsk, cur_dsk):
             entry.insert(-1, update_datetime)
         query_string = (
             '''UPDATE characters SET kills=?, blops_kills=?, hic_losses=?,
-            week_kills=?, losses=?, solo_ratio=?, sec_status=?, last_update=?
-            WHERE char_id=?'''
+            week_kills=?, losses=?, solo_ratio=?, sec_status=?, 
+            last_loss_date=?, last_kill_date=?, avg_attackers=?, covert_prob=?,
+            normal_prob=?, last_cov_ship=?, last_norm_ship=?, abyssal_losses=?,
+            last_update=? WHERE char_id=?'''
             )
 
         cache_stats = []
         for char_id in cache_hits:
             # kills, blops_kills, hic_losses, week_kills, losses, solo_ratio, sec_status, id
-            cache_query = '''SELECT kills, blops_kills, hic_losses, week_kills, losses, solo_ratio,
-             sec_status, last_update, char_id FROM characters WHERE char_id = ?'''
+            cache_query = '''
+            SELECT kills, blops_kills, hic_losses, 
+            week_kills, losses, solo_ratio, sec_status, 
+            last_loss_date, last_kill_date, avg_attackers, covert_prob,
+            normal_prob, last_cov_ship, last_norm_ship, abyssal_losses,
+            last_update, char_id FROM characters WHERE char_id = ?'''
             stat = tuple(cur_dsk.execute(cache_query, (char_id,)).fetchone()) #SHOULD ONLY BE ONE ENTRY!!!
             cache_stats.append(stat)
 
@@ -98,8 +97,6 @@ def main(char_names, conn_mem, cur_mem, conn_dsk, cur_dsk):
         db.write_many_to_db(conn_mem, cur_mem, query_string, zkill_stats)
         db.write_many_to_db(conn_mem, cur_mem, query_string, cache_stats)
 
-        # Join Pyspy remote database thread
-        tp.join()
         output = output_list(cur_mem)
         conn_mem.close()
         return output
@@ -194,6 +191,10 @@ class zKillStats(threading.Thread):
         self._q_main = q_main
 
     def run(self):
+        Logger.debug(
+            "Starting zKillboard API query for {} characters.".format(len(self._char_ids))
+        )
+
         count = 0
         max = config.ZKILL_CALLS
         threads = []
@@ -207,11 +208,12 @@ class zKillStats(threading.Thread):
             if count >= max:
                 break
         for t in threads:
-            t.join(5)
+            t.join(15)
         zkill_stats = []
         while q_sub.qsize():
             # Run through each queue item and prepare response list.
             s = q_sub.get()
+            Logger.debug("zKill stats: {}".format(s))
             kills = str(s[0])
             blops_kills = str(s[1])
             hic_losses = str(s[2])
@@ -219,49 +221,23 @@ class zKillStats(threading.Thread):
             losses = str(s[4])
             solo_ratio = str(s[5])
             sec_status = str(s[6])
-            id = str(s[7])
+            last_loss_date = str(s[7])
+            last_kill_date = str(s[8])
+            avg_attackers = str(s[9])
+            covert_prob = str(s[10])
+            normal_prob = str(s[11])
+            last_cov_ship = str(s[12])
+            last_norm_ship = str(s[13])
+            abyssal_losses = str(s[14])
+            id = str(s[15])
             zkill_stats.append([
                 kills, blops_kills, hic_losses, week_kills, losses, solo_ratio,
-                sec_status, id
+                sec_status, last_loss_date, last_kill_date, avg_attackers,
+                covert_prob, normal_prob, last_cov_ship, last_norm_ship,
+                abyssal_losses, id
                 ])
         self._q_main.put(zkill_stats)
         return
-
-
-def get_character_intel(conn, cur):
-    '''
-    Adds certain character killboard statistics derived from PySpy's
-    proprietary database to the local SQLite3 database.
-
-    :param `conn`: SQLite3 connection object.
-    :param `cur`: SQLite3 cursor object.
-    '''
-    char_ids = cur.execute("SELECT char_id FROM characters").fetchall()
-    char_intel = [] # apis.post_proprietary_db(char_ids)
-    records = ()
-    for r in char_intel:
-        char_id = r["character_id"]
-        last_loss_date = r["last_loss_date"] if r["last_loss_date"] is not None else 0
-        last_kill_date = r["last_kill_date"] if r["last_kill_date"] is not None else 0
-        avg_attackers = r["avg_attackers"] if r["avg_attackers"] is not None else 0
-        covert_prob = r["covert_prob"] if r["covert_prob"] is not None else 0
-        normal_prob = r["normal_prob"] if r["normal_prob"] is not None else 0
-        last_cov_ship = r["last_cov_ship"] if r["last_cov_ship"] is not None else 0
-        last_norm_ship = r["last_norm_ship"] if r["last_norm_ship"] is not None else 0
-        abyssal_losses = r["abyssal_losses"] if r["abyssal_losses"] is not None else 0
-
-        records = records + ((
-            last_loss_date, last_kill_date, avg_attackers, covert_prob,
-            normal_prob, last_cov_ship, last_norm_ship, abyssal_losses, char_id
-            ), )
-
-    query_string = (
-        '''UPDATE characters SET last_loss_date=?, last_kill_date=?,
-        avg_attackers=?, covert_prob=?, normal_prob=?,
-        last_cov_ship=?, last_norm_ship=?, abyssal_losses=?
-        WHERE char_id=?'''
-        )
-    db.write_many_to_db(conn, cur, query_string, records)
 
 
 def output_list(cur):

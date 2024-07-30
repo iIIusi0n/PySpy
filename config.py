@@ -71,6 +71,7 @@ LOG_FILE = os.path.join(LOG_PATH, "pyspy.log")
 GUI_CFG_FILE = os.path.join(PREF_PATH, "pyspy.cfg")
 OPTIONS_FILE = os.path.join(PREF_PATH, "pyspy.pickle")
 DB_FILE = os.path.join(PREF_PATH, "pyspy.sqlite3")
+KILLMAIL_DB_FILE = os.path.join(PREF_PATH, "killmails.sqlite3")
 
 # Persisten options object
 OPTIONS_OBJECT = optstore.PersistentOptions(OPTIONS_FILE)
@@ -104,14 +105,14 @@ OPTIONS_OBJECT.Set("version", CURRENT_VER)
 
 # Various constants
 MAX_NAMES = 500  # The max number of char names to be processed
-ZKILL_DELAY = 1  # API rate limit is 10/second, pushing it a little...
+ZKILL_DELAY = 1.5  # API rate limit is 10/second, pushing it a little...
 ZKILL_CALLS = 100
 GUI_TITLE = "PySpy " + CURRENT_VER
 FONT_SCALE_MIN = 7  # 7 equates to 70%
 FONT_SCALE_MAX = 13
 MAX_SHIP_DATA_AGE = 7  # The maximum age of ship data (used in db.prepare_ship_data)
 CYNO_HL_PERCENTAGE = 0.05  # The minimum cover / normal cyno probability for highlighting
-CACHE_TIME = 43200  # Seconds for which zkill requests are cached
+CACHE_TIME = 86400  # Seconds for which zkill requests are cached
 
 # Colour Scheme
 
@@ -194,3 +195,21 @@ LOG_DICT = {
     }
 }
 logging.config.dictConfig(LOG_DICT)
+
+# Cyno ship IDs
+COV_CYNOS = [
+    12729, 81046, 12733, 12735, 12743, # Blockade Runner
+    11188, 11192, 42246, 11182, 33397, 11172, 48636, 44993, # Covert Ops
+    33697, # Prospect
+    11969, 33675, 44995, 11957, 33395, 11965, 11963, 48635, 45531, # Force Recon
+    44996, 22440, 22428, 22430, 22436, # Black Ops
+    12034, 12032, 11377, 12038, 45530, # Stealth Bomber
+    29986, 29990, 29988, 29984, # Strategic Cruiser
+    32790, # Etana
+    42245 # Rabisu
+]
+
+NORM_CYNOS = [
+    11969, 33675, 44995, 11957, 33395, 11965, 11963, 48635, 45531, # Force Recon
+    44996, 22440, 22428, 22430, 22436 # Black Ops
+]

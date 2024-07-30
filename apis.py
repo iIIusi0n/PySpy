@@ -1,59 +1,177 @@
-# !/usr/local/bin/python3.6
-# MIT licensed
-# Copyright (c) 2018 White Russsian
-# Github: <https://github.com/Eve-PySpy/PySpy>**********************
-''' This module provides connectivity to CCP's ESI API, to zKillboard's
-API and to PySpy's own proprietary RESTful API.
-'''
-# **********************************************************************
 import json
 import logging
 import threading
 import time
-
 import requests
-
 import config
+import db
 import statusmsg
-# cSpell Checker - Correct Words****************************************
-# // cSpell:words wrusssian, ZKILL, gmail, blops, toon, HICs, russsian,
-# // cSpell:words ccp's, activepvp
-# **********************************************************************
+
 Logger = logging.getLogger(__name__)
-# Example call: Logger.info("Something badhappened", exc_info=True) ****
-
-
-# ESI Status
-# https://esi.evetech.net/ui/?version=meta#/Meta/get_status
 
 def post_req_ccp(esi_path, json_data):
-    url = "https://esi.evetech.net/latest/" + esi_path + \
-        "?datasource=tranquility"
+    url = f"https://esi.evetech.net/latest/{esi_path}?datasource=tranquility"
     try:
         r = requests.post(url, json_data)
-    except requests.exceptions.ConnectionError:
-        Logger.info("No network connection.", exc_info=True)
-        statusmsg.push_status(
-            "NETWORK ERROR: Check your internet connection and firewall settings."
-            )
-        time.sleep(5)
-        return "network_error"
-    if r.status_code != 200:
-        server_msg = json.loads(r.text)["error"]
-        Logger.info(
-            "CCP Servers at (" + esi_path + ") returned error code: " +
-            str(r.status_code) + ", saying: " + server_msg, exc_info=True
-            )
-        statusmsg.push_status(
-            "CCP SERVER ERROR: " + str(r.status_code) + " (" + server_msg + ")"
-            )
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.RequestException as e:
+        Logger.info(f"Error in CCP request: {e}", exc_info=True)
+        statusmsg.push_status(f"CCP SERVER ERROR: {r.status_code} ({r.text})")
         return "server_error"
-    return r.json()
 
+def get_killmail(id, hash):
+    url = f"https://esi.evetech.net/latest/killmails/{id}/{hash}/?datasource=tranquility"
+    headers = {
+        "User-Agent": "PySpy, Forked by: Kibeom Lee, https://github.com/iIIusi0n/PySpy, Discord: ppc64_"
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=5)
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.RequestException as e:
+        Logger.info(f"Error in killmail request: {e}", exc_info=True)
+        if not isinstance(e, requests.exceptions.Timeout):
+            statusmsg.push_status(f"CCP SERVER ERROR: {r.status_code} ({r.text})")
+        return "server_error"
+
+def is_cyno_ship(killmail, cyno_types, cyno_item_id):
+    if not isinstance(killmail, dict):
+        Logger.error("No valid killmail provided.", exc_info=True)
+        return False
+
+    try:
+        ship_id = killmail["victim"]["ship_type_id"]
+        items = killmail["victim"]["items"]
+    except KeyError:
+        Logger.error("No ship_type_id found in killmail.", exc_info=True)
+        return False
+
+    if ship_id not in cyno_types:
+        return False
+
+    return any(item["item_type_id"] == cyno_item_id for item in items)
+
+def is_cov_cyno_ship(killmail):
+    return is_cyno_ship(killmail, config.COV_CYNOS, 28646)
+
+def is_norm_cyno_ship(killmail):
+    return is_cyno_ship(killmail, config.NORM_CYNOS, 21096)
+
+def killmail_date_to_int(date):
+    try:
+        return int(date.split("T")[0].replace("-", ""))
+    except Exception:
+        Logger.error("Failed to convert date to int.", exc_info=True)
+        return 0
+
+def cache_killmail(id, hash, conn_dsk, cur_dsk):
+    cur_dsk.execute(
+        "SELECT ship_id, is_covert, is_normal, attackers, kill_date FROM kills WHERE killmail_id = ?",
+        (id,)
+    )
+    result = cur_dsk.fetchone()
+    if result:
+        return result
+
+    killmail = get_killmail(id, hash)
+    if killmail == "server_error":
+        return "network_error"
+
+    is_cov = is_cov_cyno_ship(killmail)
+    is_norm = is_norm_cyno_ship(killmail)
+    ship_id = killmail["victim"]["ship_type_id"]
+    attackers = len(killmail["attackers"])
+    kill_date = killmail_date_to_int(killmail["killmail_time"])
+
+    cur_dsk.execute(
+        "INSERT INTO kills (killmail_id, ship_id, is_covert, is_normal, attackers, kill_date) VALUES (?, ?, ?, ?, ?, ?)",
+        (id, ship_id, is_cov, is_norm, attackers, kill_date)
+    )
+    conn_dsk.commit()
+    return ship_id, is_cov, is_norm, attackers, kill_date
+
+def get_zkillboard_data(url, char_id):
+    headers = {
+        "Accept-Encoding": "gzip",
+        "User-Agent": "PySpy, Forked by: Kibeom Lee, https://github.com/iIIusi0n/PySpy, Discord: ppc64_"
+    }
+    try:
+        r = requests.get(url, headers=headers)
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.RequestException as e:
+        Logger.info(f"Error in zKillboard request for character ID {char_id}: {e}", exc_info=True)
+        statusmsg.push_status(f"ZKILL SERVER ERROR: {r.status_code} ({r.text})")
+        return None
+
+def get_kills(char_id, conn_dsk, cur_dsk):
+    last_kill_date = 0
+    avg_attackers = 0
+
+    url = f"https://zkillboard.com/api/kills/characterID/{char_id}/"
+    kills_data = get_zkillboard_data(url, char_id)
+
+    if not kills_data:
+        return last_kill_date, avg_attackers
+
+    kills_data = kills_data[:100]
+
+    for kill in kills_data:
+        kill_id = kill["killmail_id"]
+        kill_hash = kill["zkb"]["hash"]
+        result = cache_killmail(kill_id, kill_hash, conn_dsk, cur_dsk)
+        if result == "network_error":
+            return last_kill_date, avg_attackers
+        ship_id, is_cov, is_norm, attackers, kill_date = result
+        last_kill_date = max(last_kill_date, kill_date)
+        avg_attackers += attackers
+
+    if kills_data:
+        avg_attackers /= len(kills_data)
+
+    return last_kill_date, avg_attackers
+
+def get_losses(char_id, conn_dsk, cur_dsk):
+    last_loss_date = covert_prob = normal_prob = last_cov_ship = last_norm_ship = abyssal_losses = 0
+    last_cov_date = last_norm_date = 0
+
+    url = f"https://zkillboard.com/api/losses/characterID/{char_id}/"
+    losses_data = get_zkillboard_data(url, char_id)
+
+    if not losses_data:
+        return last_loss_date, covert_prob, normal_prob, last_cov_ship, last_norm_ship, abyssal_losses
+
+    losses_data = losses_data[:50]
+
+    for loss in losses_data:
+        loss_id = loss["killmail_id"]
+        loss_hash = loss["zkb"]["hash"]
+        result = cache_killmail(loss_id, loss_hash, conn_dsk, cur_dsk)
+        if result == "network_error":
+            return last_loss_date, covert_prob, normal_prob, last_cov_ship, last_norm_ship, abyssal_losses
+        ship_id, is_cov, is_norm, attackers, loss_date = result
+        last_loss_date = max(last_loss_date, loss_date)
+        if is_cov:
+            covert_prob += 1
+            if loss_date > last_cov_date:
+                last_cov_date = loss_date
+                last_cov_ship = ship_id
+        if is_norm:
+            normal_prob += 1
+            if loss_date > last_norm_date:
+                last_norm_date = loss_date
+                last_norm_ship = ship_id
+        if "loc:abyssal" in loss["zkb"]["labels"]:
+            abyssal_losses += 1
+
+    if losses_data:
+        covert_prob /= len(losses_data)
+        normal_prob /= len(losses_data)
+
+    return last_loss_date, covert_prob, normal_prob, last_cov_ship, last_norm_ship, abyssal_losses
 
 class Query_zKill(threading.Thread):
-    # Run in a separate thread to query certain kill board statistics
-    # from zKillboard's API and return the values via a queue object.
     def __init__(self, char_id, q):
         super(Query_zKill, self).__init__()
         self.daemon = True
@@ -61,187 +179,66 @@ class Query_zKill(threading.Thread):
         self._queue = q
 
     def run(self):
-        url = (
-            "https://zkillboard.com/api/stats/characterID/" +
-            str(self._char_id) + "/"
-            )
-        headers = {
-            "Accept-Encoding": "gzip",
-            "User-Agent": "PySpy, Author: White Russsian, https://github.com/WhiteRusssian/PySpy"
-            }
-        try:
-            r = requests.get(url, headers=headers)
-        except requests.exceptions.ConnectionError:
-            Logger.info("No network connection.", exc_info=True)
-            statusmsg.push_status(
-                '''NETWORK ERROR: Check your internet connection
-                and firewall settings.'''
-                )
-            time.sleep(5)
-            return "network error"
-        if r.status_code != 200:
-            server_msg = "N/A"
-            try:
-                server_msg = json.loads(r.text)["error"]
-            except:
-                pass
-            Logger.info(
-                "zKillboard server returned error for character ID " +
-                str(self._char_id) + ". Error code: " + str(r.status_code),
-                exc_info=True
-                )
-            statusmsg.push_status(
-                "ZKILL SERVER ERROR: " + str(r.status_code) + " (" + server_msg + ")"
-            )
-            return "server error"
-        try:
-            r = r.json()
-        except AttributeError:
-            kills = 0
-            blops_kills = 0
-            hic_losses = 0
-            self._queue.put([kills, blops_kills, self._char_id])
+        conn, cur = db.connect_killmail_db()
+
+        url = f"https://zkillboard.com/api/stats/characterID/{self._char_id}/"
+        stats_data = get_zkillboard_data(url, self._char_id)
+
+        if not stats_data:
+            cur.close()
+            conn.close()
             return
 
-        try:
-            # Number of total kills
-            kills = r["shipsDestroyed"]
-        except (KeyError, TypeError):
-            kills = 0
+        kills = stats_data.get("shipsDestroyed", 0)
+        blops_kills = stats_data.get("groups", {}).get("898", {}).get("shipsDestroyed", 0)
+        hic_losses = stats_data.get("groups", {}).get("894", {}).get("shipsLost", 0)
+        week_kills = stats_data.get("activepvp", {}).get("kills", {}).get("count", 0)
+        losses = stats_data.get("shipsLost", 0)
+        solo_ratio = int(stats_data.get("soloKills", 0)) / int(stats_data.get("shipsDestroyed", 1))
+        sec_status = stats_data.get("info", {}).get("secStatus", 0)
 
-        try:
-            # Number of BLOPS killed
-            blops_kills = r["groups"]["898"]["shipsDestroyed"]
-        except (KeyError, TypeError):
-            blops_kills = 0
+        time.sleep(1)
+        last_kill_date, avg_attackers = get_kills(self._char_id, conn, cur)
 
-        try:
-            # Number of HICs lost
-            hic_losses = r["groups"]["894"]["shipsLost"]
-        except (KeyError, TypeError):
-            hic_losses = 0
+        time.sleep(1)
+        last_loss_date, covert_prob, normal_prob, last_cov_ship, last_norm_ship, abyssal_losses = get_losses(self._char_id, conn, cur)
 
-        try:
-            # Kills over past 7 days
-            week_kills = r["activepvp"]["kills"]["count"]
-        except (KeyError, TypeError):
-            week_kills = 0
+        self._queue.put([
+            kills, blops_kills, hic_losses, week_kills, losses, solo_ratio,
+            sec_status, last_loss_date, last_kill_date, avg_attackers,
+            covert_prob, normal_prob, last_cov_ship, last_norm_ship,
+            abyssal_losses, self._char_id
+        ])
 
-        try:
-            # Number of total losses
-            losses = r["shipsLost"]
-        except (KeyError, TypeError):
-            losses = 0
+        cur.close()
+        conn.close()
 
-        try:
-            # Ratio of solo kills to total kills
-            solo_ratio = int(r["soloKills"]) / int(r["shipsDestroyed"])
-        except (KeyError, TypeError):
-            solo_ratio = 0
-
-        try:
-            # Security status
-            sec_status = r["info"]["secStatus"]
-        except (KeyError, TypeError):
-            sec_status = 0
-
-        self._queue.put(
-            [kills, blops_kills, hic_losses, week_kills, losses, solo_ratio,
-            sec_status, self._char_id]
-            )
-        return
-
-
-def post_proprietary_db(character_ids):
-    '''
-    Query PySpy's proprietary kill database for the character ids
-    provided as a list or tuple of integers. Returns a JSON containing
-    one line per character id.
-
-    :param `character_ids`: List or tuple of character ids as integers.
-    :return: JSON dictionary containing certain statistics for each id.
-    '''
-    url = "http://pyspy.pythonanywhere.com" + "/character_intel/" + "v1/"
-    headers = {
-        "Accept-Encoding": "gzip",
-        "User-Agent": "PySpy, Author: White Russsian, https://github.com/WhiteRusssian/PySpy"
-        }
-    # Character_ids is a list of tuples, which needs to be converted to dict
-    # with list as value.
-    character_ids = {"character_ids": character_ids}
-    try:
-        r = requests.post(url, headers=headers, json=character_ids)
-    except requests.exceptions.ConnectionError:
-        Logger.info("No network connection.", exc_info=True)
-        statusmsg.push_status(
-            "NETWORK ERROR: Check your internet connection and firewall settings."
-            )
-        time.sleep(5)
-        return "network_error"
-    if r.status_code != 200:
-        server_msg = json.loads(r.text)["error"]
-        Logger.info(
-            "PySpy server returned error code: " +
-            str(r.status_code) + ", saying: " + server_msg, exc_info=True
-            )
-        statusmsg.push_status(
-            "PYSPY SERVER ERROR: " + str(r.status_code) + " (" + server_msg + ")"
-            )
-        return "server_error"
-    return r.json()
-
+        Logger.info(f"zKillboard API query for character ID {self._char_id} completed.")
 
 def get_ship_data():
-    '''
-    Produces a list of ship id and ship name pairs for each ship in EVE
-    Online, using ESI's universe/names endpoint.
-
-    :return: List of lists containing ship ids and related ship names.
-    '''
     all_ship_ids = get_all_ship_ids()
     if not isinstance(all_ship_ids, (list, tuple)) or len(all_ship_ids) < 1:
-        Logger.error("[get_ship_data] No valid ship ids provided.", exc_info=True)
+        Logger.error("No valid ship ids provided.", exc_info=True)
         return
 
     url = "https://esi.evetech.net/v2/universe/names/?datasource=tranquility"
     json_data = json.dumps(all_ship_ids)
     try:
         r = requests.post(url, json_data)
-    except requests.exceptions.ConnectionError:
-        Logger.error("[get_ship_data] No network connection.", exc_info=True)
-        return "network_error"
-    if r.status_code != 200:
-        server_msg = json.loads(r.text)["error"]
-        Logger.error(
-            "[get_ship_data] CCP Servers returned error code: " +
-            str(r.status_code) + ", saying: " + server_msg, exc_info=True
-            )
+        r.raise_for_status()
+        return [[ship['id'], ship['name']] for ship in r.json()]
+    except requests.exceptions.RequestException as e:
+        Logger.error(f"Error in ship data request: {e}", exc_info=True)
         return "server_error"
-    ship_data = list(map(lambda r: [r['id'], r['name']], r.json()))
-    return ship_data
-
 
 def get_all_ship_ids():
-    '''
-    Uses ESI's insurance/prices endpoint to get all available ship ids.
-
-    :return: List of ship ids as integers.
-    '''
     url = "https://esi.evetech.net/v1/insurance/prices/?datasource=tranquility"
-
     try:
         r = requests.get(url)
-    except requests.exceptions.ConnectionError:
-        Logger.error("[get_ship_ids] No network connection.", exc_info=True)
-        return "network_error"
-    if r.status_code != 200:
-        server_msg = json.loads(r.text)["error"]
-        Logger.error(
-            "[get_ship_ids] CCP Servers at returned error code: " +
-            str(r.status_code) + ", saying: " + server_msg, exc_info=True
-            )
+        r.raise_for_status()
+        ship_ids = [str(ship['type_id']) for ship in r.json()]
+        Logger.info(f"Number of ship ids found: {len(ship_ids)}")
+        return ship_ids
+    except requests.exceptions.RequestException as e:
+        Logger.error(f"Error in ship IDs request: {e}", exc_info=True)
         return "server_error"
-
-    ship_ids = list(map(lambda r: str(r['type_id']), r.json()))
-    Logger.info("[get_ship_ids] Number of ship ids found: " + str(len(ship_ids)))
-    return ship_ids

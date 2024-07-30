@@ -46,6 +46,34 @@ def connect_persistent_db():
     prepare_ship_data(conn, cur)
     return conn, cur
 
+
+def connect_killmail_db():
+    '''
+    Create on disk database for killmails
+
+    @returns: connection and cursor objects as conn and cur
+    '''
+    Logger.info("Connecting to killmail DB - {}".format(config.KILLMAIL_DB_FILE))
+    conn = sqlite3.connect(config.KILLMAIL_DB_FILE)
+    cur = conn.cursor()
+    prepare_killmail_table(conn, cur)
+    return conn, cur
+
+
+def prepare_killmail_table(conn, cur):
+    cur.execute(
+        '''CREATE TABLE IF NOT EXISTS kills (
+        killmail_id INT,
+        ship_id INT,
+        is_covert BOOLEAN,
+        is_normal BOOLEAN,
+        attackers INT,
+        kill_date INT)'''
+        )
+
+    conn.commit()
+
+
 def prepare_tables(conn, cur):
     '''
     Create a few tables, unless they already exist. Do not close the
