@@ -20,7 +20,6 @@ import wx
 import pyperclip
 
 import analyze
-import chkversion
 import config
 import gui
 import reportstats
@@ -90,18 +89,16 @@ def analyze_chars(char_names):
 
 os.environ["WXSUPPRESS_SIZER_FLAGS_CHECK"] = "1"
 
-app = gui.App(0)  # Has to be defined before background thread starts.
+try:
+    app = gui.App(0)  # Has to be defined before background thread starts.
 
-background_thread = threading.Thread(
-    target=watch_clpbd,
-    daemon=True
-    )
-background_thread.start()
+    background_thread = threading.Thread(
+        target=watch_clpbd,
+        daemon=True
+        )
+    background_thread.start()
 
-update_checker = threading.Thread(
-    target=chkversion.chk_github_update,
-    daemon=True
-    )
-update_checker.start()
-
-app.MainLoop()
+    app.MainLoop()
+except SystemExit:
+    Logger.info("PySpy has been terminated.")
+    os.exit(0)

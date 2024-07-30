@@ -947,25 +947,6 @@ class Frame(wx.Frame):
         self.options.Set("GuiAlpha", alpha)
         self.Layout()
 
-    def updateAlert(self, latest_ver, cur_ver):
-        '''
-        Simple dialog box to notify user when new version of PySpy is
-        available for download. Gets called by chk_github_update()
-        in chkversion.py.
-        '''
-        self.ToggleWindowStyle(wx.STAY_ON_TOP)
-        msgbox = wx.MessageBox(
-            "PySpy " + str(latest_ver) + " is now available. You are running " +
-            str(cur_ver) + ". Would you like to update now?",
-            'Update Available',
-            wx.YES_NO | wx.YES_DEFAULT | wx.ICON_INFORMATION | wx.STAY_ON_TOP
-            )
-        if msgbox == wx.YES:
-            webbrowser.open_new_tab(
-                "https://github.com/Eve-PySpy/PySpy/releases/latest"
-                )
-        self.ToggleWindowStyle(wx.STAY_ON_TOP)
-
     def _toggleIgnoreFactions(self, e):
         ig_galmin = self.ignore_galmin.IsChecked()
         ig_amacal = self.ignore_amacal.IsChecked()
