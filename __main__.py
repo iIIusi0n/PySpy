@@ -14,6 +14,7 @@ import logging
 import re
 import threading
 import time
+import os
 
 import wx
 import pyperclip
@@ -86,6 +87,8 @@ def analyze_chars(char_names):
             "content was: " + str(char_names), exc_info=True
         )
 
+
+os.environ["WXSUPPRESS_SIZER_FLAGS_CHECK"] = "1"
 
 app = gui.App(0)  # Has to be defined before background thread starts.
 
