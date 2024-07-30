@@ -237,7 +237,7 @@ def get_character_intel(conn, cur):
     :param `cur`: SQLite3 cursor object.
     '''
     char_ids = cur.execute("SELECT char_id FROM characters").fetchall()
-    char_intel = apis.post_proprietary_db(char_ids)
+    char_intel = [] # apis.post_proprietary_db(char_ids)
     records = ()
     for r in char_intel:
         char_id = r["character_id"]
